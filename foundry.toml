@@ -1,0 +1,21 @@
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+script = "script"
+libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts-ccip/contracts/=lib/chainlink-ccip/chains/evm/contracts/",
+    "@chainlink/contracts/=lib/chainlink-evm/contracts/",
+]
+fs_permissions = [{ access = "read", path = "./" }]
+
+[rpc_endpoints]
+subtensor = "${SUBTENSOR_RPC}"
+base = "${BASE_RPC}"
