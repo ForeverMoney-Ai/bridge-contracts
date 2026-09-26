@@ -1,0 +1,34 @@
+{
+  "sourceCommit": "5ac33fcd2878de1251662c33c52ab6f9392abc25",
+  "sourceSha256": {
+    "legacy/v5/src/AlphaGateway.sol": "99815ccad7d9d2c790188dd0bad28de8542c1c87745171bad12bb7837e676965",
+    "legacy/v5/src/ExitPayload.sol": "1cff2d452c70705cd5dd5154a82f62618548f5bd1a1a7d15f04610368b39d802",
+    "legacy/v5/src/IntegratorFee.sol": "9dd71e4d51236e07d60ef1b1fcf971c631268233f1fa113bfde675a5fb6d3fa6",
+    "legacy/v5/src/interfaces/IAlphaVault.sol": "6eb3218f03b02b516645e178d15cfeafea163afbe338e0db4f1191d5ef4fa538",
+    "legacy/v5/src/interfaces/IBalanceTransfer.sol": "386e3257c23641e606e878eff340b04b8ae46377662f05c07ad192814b7dc277",
+    "legacy/v5/src/interfaces/IStaking.sol": "9c3cc431bb2da377fbf91bb901a74b59d1cf8eb5358a08cd1a73cfbbb2f92b8b"
+  },
+  "chainId": 964,
+  "block": 9150566,
+  "address": "0xcd0C6d98D0A126B1c113d15b4c28F38321437787",
+  "runtimeBytes": 16118,
+  "runtimeSha256": "04a15c616e9e2d001ebe39cec92f26ab95695117fb66924c8d7c269417c6fb39",
+  "immutableRangesMasked": 34,
+  "executableMatchAfterMaskingImmutables": true,
+  "matchIncludingMetadataAfterMaskingImmutables": false,
+  "metadataDifferingBytes": 32,
+  "spokes": {
+    "base": {
+      "chainId": 8453,
+      "block": 51810001,
+      "address": "0x1da2415229b614C787e145D1D7346eb496319C52",
+      "hub": "0xcd0C6d98D0A126B1c113d15b4c28F38321437787"
+    },
+    "robinhood": {
+      "chainId": 4663,
+      "block": 72920993,
+      "address": "0xf27fdA637131E25B2A1b4865ED9597d881980c7E",
+      "hub": "0xcd0C6d98D0A126B1c113d15b4c28F38321437787"
+    }
+  }
+}

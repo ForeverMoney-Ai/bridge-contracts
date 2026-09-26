@@ -5,15 +5,16 @@ chains, without unstaking it. The stake keeps earning on Bittensor while a 1:1 t
 [Chainlink CCIP](https://docs.chain.link/ccip); it is redeemable for the underlying position at any
 time, either as liquid TAO or as the staked position itself.
 
-This repository is a snapshot of the contracts as deployed to mainnet, published for audit. It is
-squashed to a single commit: the development history, the off-chain services, the deploy records and
-the frontend live in the private monorepo.
+This repository is a snapshot of the contracts as deployed to mainnet, published for audit.
+The initial snapshot was squashed to a single commit; subsequent changes are tracked here. The development history,
+off-chain services, deploy records and frontend live in the private monorepo.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/` | **the audit scope** — every contract we wrote |
+| `src/` | Current contract source in the audit scope |
+| `legacy/v5/` | Older hub source, **still active for inbound transfers** and also in the audit scope |
 | `test/` | Foundry tests (239, all passing) |
 | `test-onchain/` | tests that run against mainnet forks / live chains |
 | `script/` | Foundry deployment and wiring scripts |
@@ -38,9 +39,14 @@ behaviour can only be exercised on-chain — that is what `test-onchain/` is for
 
 ## Deployed, and how to verify it
 
-Every address below was checked against this exact source tree: compiled locally, then compared
-byte-for-byte with the deployed runtime code. All differences fall inside immutable slots, which is
-what a match looks like for contracts with constructor-set immutables.
+The current contracts compile to the deployed executable runtime code after masking the compiler's
+constructor-set immutable slots. The vault, four home-chain tokens and both spokes also match the
+compiler metadata. The current v6 hub differs only in a 32-byte metadata hash after masking immutables.
+
+The still-active v5 hub is preserved separately in [`legacy/v5/`](legacy/v5/README.md). Its executable
+runtime also matches that preserved source after masking immutables; its 32-byte metadata hash differs.
+These checks establish executable-code identity, not a security audit or validation of every
+constructor value and current storage setting.
 
 | Contract | Chain | Address |
 |---|---|---|
@@ -54,9 +60,11 @@ what a match looks like for contracts with constructor-set immutables.
 | SpokeGateway v5 | Base | `0x1da2415229b614C787e145D1D7346eb496319C52` |
 | SpokeGateway v5 | Robinhood | `0xf27fdA637131E25B2A1b4865ED9597d881980c7E` |
 
-The v5 hub predates this snapshot by one commit; its source differs only in the 32-byte metadata
-hash, and it is kept live because the spokes still route inbound traffic through it. Older v4
-contracts remain deployed for in-flight messages and are not part of this scope.
+Both Base and Robinhood spokes send transfers back to the v5 hub on Bittensor at
+`0xcd0C6d98D0A126B1c113d15b4c28F38321437787`; their `SUBTENSOR_GATEWAY` pointers are immutable.
+The SDK uses the current v6 hub for outbound transfers from Bittensor. The v5 hub has different
+executable code from v6, so review its preserved source as part of the live bridge flow.
+Older v4 contracts remain outside this repository's scope.
 
 The spoke-side tokens on Base and Robinhood are Chainlink's `BurnMintERC20` with Chainlink's
 `BurnMintTokenPool` / `LockReleaseTokenPool`, used unmodified from `lib/`; they are not our code.
@@ -68,12 +76,16 @@ forge build
 # then, per contract, compare `out/<C>.sol/<C>.json` .deployedBytecode.object with
 # `cast code <address> --rpc-url <chain>`, ignoring the byte ranges listed in
 # .deployedBytecode.immutableReferences
+# For the current hub, also account for the 32-byte metadata hash difference.
+
+# Build the preserved v5 source separately and verify its live runtime + spoke routing:
+python3 scripts/verify-v5.py
 ```
 
 ## Build
 
 Requires [Foundry](https://book.getfoundry.sh/). Dependencies are already vendored in `lib/`, so a
-clone builds offline:
+clone builds offline once the pinned compiler is installed:
 
 ```bash
 forge build
