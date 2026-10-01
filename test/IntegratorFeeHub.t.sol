@@ -139,6 +139,18 @@ contract IntegratorFeeHubTest is Test {
         assertEq(user.balance, before, "no value left the caller");
     }
 
+    /// A quote that succeeds for a bridge that reverts is worse than no quote.
+    function test_withFeeQuoteRejectsATopUpBelowTheFloor() public {
+        uint256 topUp = gw.integratorTaoTopUp(0.1 ether, 100);
+        vm.expectRevert(abi.encodeWithSignature("TopUpBelowMinStake(uint256,uint256)", topUp, MIN_ADD_STAKE));
+        gw.quoteBridgeOutWithFee(BASE_SEL, address(wtao), dest, 1 ether, 0.1 ether, 0, _fee(100));
+    }
+
+    function test_withFeeQuoteStillWorksAtTheFloor() public view {
+        (, uint256 nativeTopUp,,) = gw.quoteBridgeOutWithFee(BASE_SEL, address(wtao), dest, 1 ether, 0.2 ether, 0, _fee(100));
+        assertEq(nativeTopUp, MIN_ADD_STAKE);
+    }
+
     function test_topUpExactlyAtTheFloorIsAccepted() public {
         uint256 topUp = gw.integratorTaoTopUp(0.2 ether, 100);
         assertEq(topUp, MIN_ADD_STAKE, "1% of 0.2 TAO is exactly the floor");

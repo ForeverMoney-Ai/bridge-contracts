@@ -67,11 +67,17 @@ contract SpokeGateway {
     error ZeroIntegrator();
     error IntegratorFeeTransferFailed();
 
-    /// @notice Smallest amount a LIQUID exit may carry (2,000,000 RAO = 0.002 TAO, 18-dec wei).
-    ///         Below this the hub's `removeStake` reverts, so the arrival can only be booked
-    ///         claimable and the user has to come back for it. Rejecting at the source is cheaper
-    ///         and clearer. Staked exits are not bounded here: they have their own, lower floor.
+    /// @notice Smallest amount an exit may carry, per route, in 18-dec wei. Below these the hub's
+    ///         precompile call reverts, so the arrival can only be booked claimable and the user has
+    ///         to come back for it; rejecting at the source is cheaper and clearer. Measured on
+    ///         mainnet 964: `removeStake` (the liquid route) reverts below 2,000,000 RAO,
+    ///         `transferStake` (the staked route) below 1,000,000 RAO.
+    /// @dev    These bound what CROSSES. The vault itself does not mirror them: it is immutable and
+    ///         these are runtime parameters, so pinning them there could permanently block
+    ///         withdrawals the runtime would still serve. Here the cost of a stale floor is a
+    ///         rejected message, not a stuck position.
     uint256 internal constant MIN_LIQUID_EXIT_WEI = 2_000_000 * 1e9;
+    uint256 internal constant MIN_STAKED_EXIT_WEI = 1_000_000 * 1e9;
 
     /// @notice Default destination-execution gas budget for `handleExit` on 964. Sized for today's
     ///         exit logic; callers may override per-message via the 4-arg `bridgeToFinney` (passing 0
@@ -89,6 +95,7 @@ contract SpokeGateway {
 
     error ZeroAmount();
     error LiquidExitBelowMin(uint256 amount, uint256 min);
+    error StakedExitBelowMin(uint256 amount, uint256 min);
     error ZeroAddress();
     error ZeroSelector();
     error ZeroFallback();
@@ -165,6 +172,15 @@ contract SpokeGateway {
 
     /// @dev What a caller must actually send: router fee plus markup. Quoted rather than the bare
     ///      CCIP fee, so nobody is told one number and charged another.
+    /// @dev One floor check for both routes, so the quote and the bridge can never disagree.
+    function _requireAboveExitFloor(uint256 amount, bool wantLiquid) private pure {
+        if (wantLiquid) {
+            if (amount < MIN_LIQUID_EXIT_WEI) revert LiquidExitBelowMin(amount, MIN_LIQUID_EXIT_WEI);
+        } else if (amount < MIN_STAKED_EXIT_WEI) {
+            revert StakedExitBelowMin(amount, MIN_STAKED_EXIT_WEI);
+        }
+    }
+
     function _grossFee(uint256 ccipFee) private view returns (uint256) {
         return ccipFee + (ccipFee * bridgeFeeBps) / 10_000;
     }
@@ -214,7 +230,7 @@ contract SpokeGateway {
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
         if (exit.evmFallback == address(0)) revert ZeroFallback();
-        if (exit.wantLiquid && amount < MIN_LIQUID_EXIT_WEI) revert LiquidExitBelowMin(amount, MIN_LIQUID_EXIT_WEI);
+        _requireAboveExitFloor(amount, exit.wantLiquid);
         _validateIntegratorFee(integrator);
         cut = _integratorCut(amount, integrator);      // paid on top by the caller
         net = amount;                                    // crosses in full
@@ -268,7 +284,7 @@ contract SpokeGateway {
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
         if (exit.evmFallback == address(0)) revert ZeroFallback(); // must never enter the system zero
-        if (exit.wantLiquid && amount < MIN_LIQUID_EXIT_WEI) revert LiquidExitBelowMin(amount, MIN_LIQUID_EXIT_WEI);
+        _requireAboveExitFloor(amount, exit.wantLiquid);
         _validateIntegratorFee(integrator);
 
         uint256 cut = _integratorCut(amount, integrator);

@@ -27,7 +27,7 @@ import {StakeSource} from "./StakeSource.sol";
 ///
 ///   Spoke -> Finney: three delivery modes, chosen by the exit payload. A coldkey with
 ///                    `wantLiquid=false` delivers the position as STAKED alpha via `withdrawStaked`
-///                    (zero slippage, still staked, no gas needed on 964); `wantLiquid=true` unwraps
+///                    (no AMM leg, still staked, no gas needed on 964); `wantLiquid=true` unwraps
 ///                    to native TAO and exits via the 0x800 precompile; NO coldkey and
 ///                    `wantLiquid=false` hands the wrapped ERC20 itself to `evmFallback` on 964.
 ///
@@ -331,6 +331,9 @@ contract AlphaGateway is CCIPReceiver {
     ) external view returns (uint256 grossFee, uint256 nativeTopUp, uint256 alphaTopUp, uint256 crossing) {
         (grossFee, crossing) = _quoteBridgeOut(destSelector, token, recipient, mintedAmount, fee);
         nativeTopUp = integratorTaoTopUp(taoAmount, fee.bps);
+        // Reject exactly what execution rejects: a quote that succeeds for a bridge that reverts is
+        // worse than no quote (same rule as `quoteBridgeOut`).
+        if (nativeTopUp > 0 && nativeTopUp < MIN_ADD_STAKE_WEI) revert TopUpBelowMinStake(nativeTopUp, MIN_ADD_STAKE_WEI);
         alphaTopUp = integratorCut(stakedAlphaRao, fee.bps);
     }
 
@@ -454,7 +457,7 @@ contract AlphaGateway is CCIPReceiver {
         // currency, one mental model. The extra input rides on top (extra native TAO in msg.value for
         // the liquid leg, extra approved alpha for the staked leg) and is minted for them, so what the
         // caller asked to bridge crosses in full. The wrapped token is a 1:1 claim on the same staked
-        // position: `withdrawStaked` hands it over as stake with zero slippage, `withdrawLiquid` as
+        // position: `withdrawStaked` hands it over as stake with no AMM leg, `withdrawLiquid` as
         // native TAO, and it bridges like any ERC20 — so this denies them nothing.
         uint256 taoTopUp = integratorTaoTopUp(taoAmount, fee.bps);
         // A top-up under the runtime's add_stake floor cannot be staked, so the whole bridge would
@@ -872,7 +875,7 @@ contract AlphaGateway is CCIPReceiver {
                     emit Claimable(token, evmFallback, 0, exitAmount);
                 }
             } else {
-                // deliver the staked position directly to the destination coldkey (zero slippage)
+                // deliver the staked position directly to the destination coldkey (no AMM leg)
                 try VAULT.withdrawStaked(token, exitAmount, ss58) {
                     emit DeliveredStaked(token, ss58, exitAmount / RAO);
                 } catch {
@@ -916,7 +919,7 @@ contract AlphaGateway is CCIPReceiver {
     }
 
     /// @notice Claim a stuck balance as the underlying STAKED position, delivered straight to
-    ///         `destColdkey` (zero slippage) — the preferred path, so the user never has to hold or
+    ///         `destColdkey` (no AMM leg) — the preferred path, so the user never has to hold or
     ///         re-bridge the token. Any sub-RAO remainder (which cannot be unstaked) goes to `to`.
     /// @dev    Unwrapping is a withdrawal, so this reverts while the vault is halted — the revert
     ///         rolls everything back; retry once the halt lifts. CEI: balance zeroed before calls.

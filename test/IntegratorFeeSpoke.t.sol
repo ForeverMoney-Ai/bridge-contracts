@@ -134,11 +134,20 @@ contract IntegratorFeeSpokeTest is Test {
         assertTrue(seen);
     }
 
+    /// The cut rounds DOWN, so a small enough amount pays the integrator nothing. Since the exit
+    /// floors landed, an amount that small can no longer reach the bridge, so assert the rounding at
+    /// the smallest amount that CAN: 1 bps of the staked floor still rounds to a non-zero cut, and
+    /// the rounding itself is covered by the pure quote below.
     function test_tinyAmountRoundsCutToZero() public {
         vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSignature("StakedExitBelowMin(uint256,uint256)", 3, MIN_STAKED));
         gw.bridgeToFinneyWithFee{value: FEE}(address(token), 3, _exit(), 0, _fee(100));
-        assertEq(token.balanceOf(integrator), 0);
-        assertEq(token.balanceOf(address(router)), 3);
+
+        // at the floor the cut is real, not rounded away
+        vm.prank(alice);
+        gw.bridgeToFinneyWithFee{value: FEE}(address(token), MIN_STAKED, _exit(), 0, _fee(1));
+        assertEq(token.balanceOf(integrator), MIN_STAKED / 10_000, "1 bps of the floor");
+        assertEq(token.balanceOf(address(router)), MIN_STAKED, "the full amount still crosses");
     }
 
     function test_transferFailureRevertsTheBridge() public {
@@ -256,6 +265,25 @@ contract IntegratorFeeSpokeTest is Test {
     }
 
     /// A quote that succeeds for a bridge that would revert is worse than no quote.
+    uint256 constant MIN_STAKED = 1_000_000 * 1e9; // 0.001 TAO, the transferStake floor
+
+    function test_stakedExitBelowItsOwnFloorReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSignature("StakedExitBelowMin(uint256,uint256)", MIN_STAKED - 1, MIN_STAKED));
+        gw.bridgeToFinney{value: FEE}(address(token), MIN_STAKED - 1, _exit());
+    }
+
+    function test_stakedExitAtItsFloorPasses() public {
+        vm.prank(alice);
+        gw.bridgeToFinney{value: FEE}(address(token), MIN_STAKED, _exit());
+        assertEq(token.balanceOf(address(router)), MIN_STAKED);
+    }
+
+    function test_quoteRejectsTheSameTinyStakedExit() public {
+        vm.expectRevert(abi.encodeWithSignature("StakedExitBelowMin(uint256,uint256)", MIN_STAKED - 1, MIN_STAKED));
+        gw.quoteBridgeToFinney(address(token), MIN_STAKED - 1, _exit());
+    }
+
     function test_quoteRejectsTheSameTinyLiquidExit() public {
         vm.expectRevert(abi.encodeWithSignature("LiquidExitBelowMin(uint256,uint256)", MIN_LIQUID - 1, MIN_LIQUID));
         gw.quoteBridgeToFinney(address(token), MIN_LIQUID - 1, _liquidExit());

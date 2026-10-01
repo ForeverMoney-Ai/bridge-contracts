@@ -10,7 +10,8 @@ interface IAlphaVault {
     /// Zero slippage. Caller must have approved the vault on 0x805 for the token's netuid.
     function depositStaked(address token, uint256 alphaRao) external returns (uint256 minted);
 
-    /// Burn `wad` of `token`, transfer the corresponding staked alpha to `destColdkey` (zero slippage).
+    /// Burn `wad` of `token`, transfer the corresponding staked alpha to `destColdkey`. No AMM leg,
+    /// so no price slippage; `transferStake` can still credit 1 RAO less when it opens a new position.
     function withdrawStaked(address token, uint256 wad, bytes32 destColdkey) external;
 
     /// Burn `wad` of `token`, unstake to native TAO, send to caller (bounded by minTaoOut).
