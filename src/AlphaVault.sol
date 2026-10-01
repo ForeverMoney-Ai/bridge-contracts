@@ -43,7 +43,9 @@ import {AlphaToken} from "./AlphaToken.sol";
 ///        AccessControlDefaultAdminRules (root rotation is 2-step + time-delayed). One
 ///        admin/operator/guardian set governs all tokens; the halt is global (a vault-logic incident
 ///        affects every token; per-token granularity can be added later if ever needed).
-///          - DEFAULT_ADMIN_ROLE : slow/root tier (Timelock -> multisig). Reroutes value
+///          - DEFAULT_ADMIN_ROLE : slow/root tier. Whether it is slow depends entirely on the
+///            holder (a multisig, optionally behind a timelock); the checks here are immediate
+///            `hasRole` checks. Reroutes value
 ///            (setEmissionsRecipient), manages roles, sets gateway lanes, and points `ccipAdmin`
 ///            (setCcipAdmin) — it does NOT list tokens.
 ///          - OPERATOR_ROLE      : fast multisig-direct tier (createToken, addToken,

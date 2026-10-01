@@ -619,8 +619,9 @@ contract AlphaGateway is CCIPReceiver {
     ///         on a validator is either zero or still at least this much.
     /// @dev    NOTHING enforces that. Verified on mainnet: pulling 10,000,000 RAO from a 25,000,000
     ///         position left 15,000,000 against this 20,000,000 reading and the runtime accepted it.
-    ///         This value does NOT gate `add_stake` either: live calls pass at 2,000,000 RAO (see
-    ///         MIN_ADD_STAKE_RAO), so treat it as advisory for what you LEAVE behind. The gateway
+    ///         This value does NOT gate `add_stake` either: live calls pass at 2,000,000 RAO (that
+    ///         floor is `MIN_ADD_STAKE_WEI`, expressed in wei), so treat this one as advisory for
+    ///         what you LEAVE behind. The gateway
     ///         cannot enforce it either: it never learns the caller's coldkey (0x805 exposes no
     ///         address->coldkey lookup, and the coldkey is blake2b("evm:"+address)), so it cannot
     ///         read their positions. Callers must plan this off-chain; there will be no revert.

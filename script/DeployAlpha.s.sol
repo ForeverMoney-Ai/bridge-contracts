@@ -25,7 +25,8 @@ import {Cfg, TokenNaming, IRegistryModuleOwnerCustom, ITokenAdminRegistry} from 
 /// Env (run):
 ///   PRIVATE_KEY          deployer key
 ///   HANDOFF              "true" for a production handoff: ADMIN/OPERATOR/GUARDIAN then REQUIRED
-///   ADMIN                DEFAULT_ADMIN_ROLE (Timelock->5/9 multisig) — defaults to deployer
+///   ADMIN                DEFAULT_ADMIN_ROLE holder (a multisig, optionally behind a timelock —
+///                        whatever is passed IS the authority) — defaults to deployer
 ///   OPERATOR             OPERATOR_ROLE — defaults to deployer
 ///   GUARDIAN             GUARDIAN_ROLE — defaults to deployer
 ///   RESCUER              gateway rescuer — defaults to ADMIN
