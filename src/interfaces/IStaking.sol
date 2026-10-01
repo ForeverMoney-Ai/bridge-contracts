@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice Subtensor-EVM staking precompile V2, at 0x0000000000000000000000000000000000000805.
 /// @dev  IMPORTANT: amounts are RAO (9-decimal, 1 TAO = 1e9), NOT 18-decimal wei. V2 takes the

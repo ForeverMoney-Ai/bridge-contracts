@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice Stand-in for the 0x800 balance-transfer precompile. Records the last exit.
 ///         Etch this at address(0x800) in tests.

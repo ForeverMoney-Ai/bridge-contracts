@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice Minimal interface the gateway needs from the multi-token AlphaVault.
 interface IAlphaVault {
@@ -16,7 +16,8 @@ interface IAlphaVault {
     /// Burn `wad` of `token`, unstake to native TAO, send to caller (bounded by minTaoOut).
     function withdrawLiquid(address token, uint256 wad, uint256 minTaoOut) external returns (uint256 taoOut);
 
-    /// True while the vault is halted and every route would revert (global, all tokens).
+    /// True while the vault is halted (global, all tokens): deposits, withdrawals, skims and root
+    /// claims revert. `executeMigration`, `migrateValidator` and `sweepExcess` are NOT gated by it.
     function isPaused() external view returns (bool);
 
     /// The token's (validator, netuid) position — reverts for unlisted tokens.
@@ -33,8 +34,9 @@ interface IAlphaVault {
     function emissionsRecipient() external view returns (address);
     function STAKING() external view returns (address);
 
-    /// Role check the gateway delegates its own admin authority to (DEFAULT_ADMIN = the Timelock),
-    /// so the gateway holds no key of its own.
+    /// Role check the gateway delegates its own admin authority to (vault DEFAULT_ADMIN_ROLE),
+    /// so the gateway holds no key of its own. Checked at call time: any delay depends on the
+    /// role holder.
     function hasRole(bytes32 role, address account) external view returns (bool);
 
     /// The address AlphaToken.getCCIPAdmin() resolves to — the account CCIP requires as msg.sender

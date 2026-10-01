@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice Per-call integrator ("frontend") fee: a cut of the BRIDGED TOKEN amount charged ON TOP
 ///         (the bridged amount is never reduced), paid to

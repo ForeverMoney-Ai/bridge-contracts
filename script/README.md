@@ -28,7 +28,16 @@ executes matured proposals). Prints the Timelock address to pass as `ADMIN` ever
 
 > `VAULT_COLDKEY` must be computed off-chain as `blake2b_256("evm:" ++ <predicted vault address>)` —
 > the EVM has no blake2b. The vault is the first contract the script deploys, so predict with
-> `cast compute-address`. The script asserts the prediction held.
+> `cast compute-address`. The script asserts the prediction held, and also **derives** the coldkey
+> from the predicted address and compares it, so a coldkey for the wrong address is rejected before
+> anything is deployed. `GATEWAY_COLDKEY` is checked the same way.
+>
+> That derivation shells out to `scripts/evm-coldkey.py`, so run `DeployAlpha` and `ResumeDeploy`
+> with **`--ffi`**:
+>
+> ```bash
+> forge script script/DeployAlpha.s.sol --rpc-url subtensor --broadcast --ffi
+> ```
 
 **`DeployAlpha.addToken()`** — `VAULT`, `NETUID`, `VALIDATOR_HOTKEY`, `TOKEN_NAME`, `TOKEN_SYMBOL`,
 `ADMIN`, `GUARDIAN`, `HANDOFF`.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
@@ -17,7 +17,8 @@ import {StakeSource} from "./StakeSource.sol";
 ///         take the token as a parameter; inbound deliveries are routed by the token that arrives in
 ///         the CCIP message.
 ///
-///   Finney -> Spoke: `bridgeOut(destSelector, token, recipient, taoAmount, stakedAlphaRao, minOut)`
+///   Finney -> Spoke: `bridgeOut(destSelector, token, recipient, taoAmount, stakedAlphaRao,
+///                    minTokenOut)`
 ///                    bridges from liquid TAO (staked fresh) and/or the caller's EXISTING staked
 ///                    alpha (pulled from msg.sender) — either or both in one tx — minting the
 ///                    MEASURED token and ccipSending the total. `bridgeTokenOut` bridges tokens the
@@ -53,6 +54,12 @@ contract AlphaGateway is CCIPReceiver {
 
     uint256 private constant RAO = 1e9;
 
+    /// @notice Smallest position `add_stake` accepts, in wei (2,000,000 RAO = 0.002 TAO). Measured on
+    ///         mainnet, where `addStake` reverts at 1,999,999 RAO and passes at 2,000,000. NOT the
+    ///         same as `getNominatorMinRequiredStake()` (20,000,000 RAO), which bounds what a
+    ///         nominator may LEAVE on a validator, not what may be added.
+    uint256 internal constant MIN_ADD_STAKE_WEI = 2_000_000 * RAO;
+
     /// @dev Netuids on which the vault has been max-approved to pull this gateway's transient stake
     ///      (for depositStaked). Lazy, once per netuid. The gateway never holds alpha at rest, so a
     ///      standing self->vault approval carries no risk.
@@ -64,11 +71,11 @@ contract AlphaGateway is CCIPReceiver {
     mapping(address => uint256) public claimableNative;
 
     /// @notice Chain selectors this gateway will bridge to and accept deliveries from. Seeded with
-    ///         BASE_SELECTOR at construction; further lanes are added on the fly by the vault's
-    ///         DEFAULT_ADMIN (Timelock -> 5/9 multisig), so a new chain inherits the same 2-day
-    ///         public notice as any other value-routing change — and the gateway still has no owner
-    ///         or key of its own. Removing a lane never traps funds: in-flight arrivals over a
-    ///         de-allowed lane are booked claimable to the sender's fallback.
+    ///         BASE_SELECTOR at construction; further lanes are set by whoever holds the vault's
+    ///         DEFAULT_ADMIN_ROLE, checked at call time — any delay depends on that holder, not on
+    ///         this contract. The gateway itself has no owner or key. Removing a lane never traps
+    ///         funds: in-flight arrivals over a de-allowed lane are booked claimable to the
+    ///         sender's fallback.
     /// @dev    NOT sufficient on its own — the token's CCIP pool must also have the remote chain
     ///         registered (applyChainUpdates) for the lane to carry anything.
     mapping(uint64 => bool) public allowedLane;
@@ -127,9 +134,9 @@ contract AlphaGateway is CCIPReceiver {
     bytes32 private constant DEFAULT_ADMIN_ROLE = 0x00; // OZ AccessControl root role
 
     /// @notice Markup charged on top of the CCIP fee, in basis points. 0 = disabled.
-    /// @dev A markup on the FEE. (The integrator fee below is a cut of the bridged amount, but it is
-    ///      a same-chain TRANSFER of already-minted tokens, never a burn or a short mint, so the 1:1
-    ///      backing every price consumer relies on still holds: 100 TAO in still mints 100 wTAO.)
+    /// @dev A markup on the FEE. The integrator fee is separate: the bridged amount is minted from
+    ///      the measured stake delta, and the integrator cut is a separate transfer that never
+    ///      short-mints it, so the 1:1 backing every price consumer relies on still holds.
     uint16 public bridgeFeeBps;
     /// @notice Ceiling on the markup, so a fat-fingered setter cannot make a hop cost 100x.
     ///         A bound, not a policy: the intended setting is far below it.
@@ -147,14 +154,14 @@ contract AlphaGateway is CCIPReceiver {
     error BridgeFeeTooHigh(uint16 bps, uint16 max);
     error FeeTransferFailed();
 
-    /// @notice Hard ceiling on the per-call integrator fee (a cut of the bridged token). Governance
-    ///         can set `maxIntegratorFeeBps` anywhere up to it.
     /// @notice Most staked positions one deposit may consolidate. Each costs ~35.4k gas
     ///         (measured on mainnet: 15 moveStake dispatches in one tx used 554,728 gas, and
     ///         subtensor applied NO rate limit), so this bound is about keeping a single
     ///         bridge transaction comfortably sized, not about a runtime constraint.
     uint256 public constant MAX_STAKE_SOURCES = 16;
 
+    /// @notice Hard ceiling on the per-call integrator fee (a cut of the bridged token). Governance
+    ///         can set `maxIntegratorFeeBps` anywhere up to it.
     uint16 public constant MAX_INTEGRATOR_FEE_BPS = 1_000; // 10%
     uint16 public constant DEFAULT_MAX_INTEGRATOR_FEE_BPS = 100; // 1%
     /// @notice Current ceiling on `IntegratorFee.bps` accepted by the bridge calls.
@@ -167,6 +174,7 @@ contract AlphaGateway is CCIPReceiver {
 
     error IntegratorFeeTooHigh(uint16 bps, uint16 max);
     error ZeroIntegrator();
+    error TopUpBelowMinStake(uint256 topUp, uint256 min);
     error ZeroValidator();
     error NoStakeSources();
     error TooManyStakeSources(uint256 given, uint256 max);
@@ -201,14 +209,15 @@ contract AlphaGateway is CCIPReceiver {
         emit MaxIntegratorFeeChanged(DEFAULT_MAX_INTEGRATOR_FEE_BPS);
     }
 
-    /// @dev Authority is DELEGATED to the vault's DEFAULT_ADMIN (the Timelock), so this contract
-    ///      holds no key of its own and lane changes inherit the timelock's delay.
+    /// @dev Authority is DELEGATED to the vault's DEFAULT_ADMIN_ROLE, so this contract holds no key
+    ///      of its own. This is an immediate `hasRole` check: any delay comes from the role holder
+    ///      (a timelock, a multisig, or neither).
     modifier onlyVaultAdmin() {
         if (!VAULT.hasRole(DEFAULT_ADMIN_ROLE, msg.sender)) revert NotVaultAdmin();
         _;
     }
 
-    /// @notice Set the markup charged on top of the CCIP fee — vault DEFAULT_ADMIN (timelocked).
+    /// @notice Set the markup charged on top of the CCIP fee — vault DEFAULT_ADMIN_ROLE.
     function setBridgeFeeBps(uint16 bps) external onlyVaultAdmin {
         if (bps > MAX_BRIDGE_FEE_BPS) revert BridgeFeeTooHigh(bps, MAX_BRIDGE_FEE_BPS);
         bridgeFeeBps = bps;
@@ -216,7 +225,7 @@ contract AlphaGateway is CCIPReceiver {
     }
 
     /// @notice Point fee income somewhere other than the vault's emissions recipient — vault
-    ///         DEFAULT_ADMIN (timelocked). Zero restores the default.
+    ///         DEFAULT_ADMIN_ROLE. Zero restores the default.
     function setFeeRecipient(address to) external onlyVaultAdmin {
         feeRecipient = to;
         emit FeeRecipientChanged(to);
@@ -280,7 +289,7 @@ contract AlphaGateway is CCIPReceiver {
         return ccipFee + (ccipFee * bridgeFeeBps) / 10_000;
     }
 
-    /// @notice Add or remove a supported chain selector — vault DEFAULT_ADMIN (timelocked).
+    /// @notice Add or remove a supported chain selector — vault DEFAULT_ADMIN_ROLE.
     /// @dev Allowing a lane the router cannot route would let users bridge into a revert; removing
     ///      is always permitted (an unsupported lane must stay removable).
     function setLane(uint64 selector, bool allowed) external onlyVaultAdmin {
@@ -369,7 +378,7 @@ contract AlphaGateway is CCIPReceiver {
     }
 
     /// @notice `bridgeOut` with an integrator fee ON TOP: the caller supplies `fee.bps` extra input
-    ///         (`integratorTaoTopUp(taoAmount, bps)` more TAO in msg.value, `integratorAlphaTopUp(
+    ///         (`integratorTaoTopUp(taoAmount, bps)` more TAO in msg.value, `integratorCut(
     ///         stakedAlphaRao, bps)` more approved alpha); it is minted as the WRAPPED TOKEN for
     ///         `fee.recipient` while the requested amount crosses in full. Validated before any TAO
     ///         is staked.
@@ -409,8 +418,9 @@ contract AlphaGateway is CCIPReceiver {
         return _bridgeOut(destSelector, token, recipient, taoAmount, sources, minTokenOut, IntegratorFee(address(0), 0));
     }
 
-    /// @notice `bridgeOutFromValidators` with an integrator fee ON TOP. The integrator's extra alpha
-    ///         is pulled from `sources[0]`, so budget that position for `alphaRao + integratorCut`.
+    /// @notice `bridgeOutFromValidators` with an integrator fee ON TOP. The integrator cut is split
+    ///         pro-rata across every source (each pays its share of `integratorCut`), with
+    ///         `sources[0]` absorbing the rounding remainder — budget every position accordingly.
     function bridgeOutFromValidatorsWithFee(
         uint64 destSelector,
         address token,
@@ -447,6 +457,10 @@ contract AlphaGateway is CCIPReceiver {
         // position: `withdrawStaked` hands it over as stake with zero slippage, `withdrawLiquid` as
         // native TAO, and it bridges like any ERC20 — so this denies them nothing.
         uint256 taoTopUp = integratorTaoTopUp(taoAmount, fee.bps);
+        // A top-up under the runtime's add_stake floor cannot be staked, so the whole bridge would
+        // revert deep inside the vault. Fail here instead, before any value moves, with a reason the
+        // caller can act on: raise the bridged amount, raise bps, or drop the fee.
+        if (taoTopUp > 0 && taoTopUp < MIN_ADD_STAKE_WEI) revert TopUpBelowMinStake(taoTopUp, MIN_ADD_STAKE_WEI);
         if (msg.value < taoAmount + taoTopUp) revert InsufficientValue();
 
         if (taoAmount > 0) {
@@ -604,8 +618,9 @@ contract AlphaGateway is CCIPReceiver {
     /// @notice The runtime's minimum nominator position. Size `alphaRao` so that whatever you LEAVE
     ///         on a validator is either zero or still at least this much.
     /// @dev    NOTHING enforces that. Verified on mainnet: pulling 10,000,000 RAO from a 25,000,000
-    ///         position left 15,000,000 against a 20,000,000 minimum and the runtime accepted it —
-    ///         `getNominatorMinRequiredStake` gates `add_stake`, not partial transfers. The gateway
+    ///         position left 15,000,000 against this 20,000,000 reading and the runtime accepted it.
+    ///         This value does NOT gate `add_stake` either: live calls pass at 2,000,000 RAO (see
+    ///         MIN_ADD_STAKE_RAO), so treat it as advisory for what you LEAVE behind. The gateway
     ///         cannot enforce it either: it never learns the caller's coldkey (0x805 exposes no
     ///         address->coldkey lookup, and the coldkey is blake2b("evm:"+address)), so it cannot
     ///         read their positions. Callers must plan this off-chain; there will be no revert.
@@ -711,11 +726,12 @@ contract AlphaGateway is CCIPReceiver {
 
     // --------------------------------------------------------------- Spoke -> Finney (delivery)
 
-    /// @dev The ONLY member that must stay `internal`: it overrides CCIPReceiver's virtual hook.
-    ///      Everything else in this contract is `private` — nothing inherits from it.
+    /// @dev Must stay `internal`: it overrides CCIPReceiver's virtual hook.
     /// @dev Never reverts. On any failure the released tokens are booked claimable (per token) to the
-    ///      rescuer. The token is whatever the CCIP message carried — possibly hostile; it is only
-    ///      ever used as the namespace and the asset handed back to its own claimants.
+    ///      `evmFallback` decoded from the payload; the rescuer is used only when the payload does
+    ///      not decode or that fallback is zero. The token is whatever the CCIP message carried —
+    ///      possibly hostile; it is only ever used as the namespace and the asset handed back to its
+    ///      own claimants.
     function _ccipReceive(Client.Any2EVMMessage memory message) internal override {
         uint256 n = message.destTokenAmounts.length;
         if (n == 0) return; // nothing arrived; nothing to do
@@ -831,8 +847,8 @@ contract AlphaGateway is CCIPReceiver {
         if (exitAmount > 0) {
             // Both vault withdrawals can revert for reasons beyond a halt (e.g. the staked
             // position is short of the redemption -> Insolvent). Wrap them so ANY vault
-            // failure books claimable to the USER's fallback — never falls through to the outer
-            // catch, which would discard evmFallback and route to the rescuer.
+            // failure books claimable to the USER's fallback rather than falling through to the
+            // outer catch (which books to the same decoded fallback, just further from the cause).
             if (wantLiquid) {
                 // unwrap to native TAO and exit to the substrate account (or evmFallback)
                 try VAULT.withdrawLiquid(token, exitAmount, p.minTaoOut) returns (uint256 taoOut) {

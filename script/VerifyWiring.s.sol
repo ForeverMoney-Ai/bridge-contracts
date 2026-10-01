@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {TokenPool} from "@chainlink/contracts-ccip/contracts/pools/TokenPool.sol";
@@ -62,6 +62,21 @@ contract VerifyWiring is Script {
         if (expected != address(0)) _check(admin == expected, "registry administrator == EXPECTED_ADMIN");
         address deployer = vm.envOr("DEPLOYER", address(0));
         if (deployer != address(0)) _check(admin != deployer, "registry administrator is NOT the deployer");
+
+        // 3b. pool custody: ownership is where the registry admin is, and never on a hot key, and
+        //     no rebalancer can move locked liquidity.
+        address poolOwner = TokenPool(pool).owner();
+        console2.log("   pool owner:", poolOwner);
+        if (expected != address(0)) _check(poolOwner == expected, "pool.owner() == EXPECTED_ADMIN");
+        if (deployer != address(0)) _check(poolOwner != deployer, "pool owner is NOT the deployer");
+        // getRebalancer() exists on LockRelease pools (the hub) but not on BurnMint ones (spokes),
+        // so probe rather than cast — one script runs against both.
+        (bool hasRebalancer, bytes memory ret) = pool.staticcall(abi.encodeWithSignature("getRebalancer()"));
+        if (hasRebalancer && ret.length == 32) {
+            address rebalancer = abi.decode(ret, (address));
+            console2.log("   pool rebalancer:", rebalancer);
+            _check(rebalancer == address(0), "pool rebalancer unset");
+        }
 
         // 4. the lane is paired on this side
         _check(TokenPool(pool).isSupportedChain(remoteSelector), "pool.isSupportedChain(remote)");

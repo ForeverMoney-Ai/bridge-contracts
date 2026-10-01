@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {SpokeGateway} from "../src/SpokeGateway.sol";
@@ -226,6 +226,45 @@ contract IntegratorFeeSpokeTest is Test {
         vm.prank(alice);
         vm.expectRevert(SpokeGateway.ZeroIntegrator.selector);
         gw.bridgeToFinneyWithFee{value: FEE}(address(token), 10 ether, _exit(), 0, IntegratorFee(address(gw), 10));
+    }
+
+    // ---------------------------------------------- liquid-exit minimum (HACK-22 / HACK-25)
+
+    function _liquidExit() internal pure returns (ExitPayload.Params memory) {
+        return ExitPayload.Params({ss58: bytes32(uint256(0xABC)), evmFallback: address(0xF00D), wantLiquid: true, minTaoOut: 0});
+    }
+
+    uint256 constant MIN_LIQUID = 2_000_000 * 1e9; // 0.002 TAO, the runtime's removeStake floor
+
+    function test_liquidExitBelowMinReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSignature("LiquidExitBelowMin(uint256,uint256)", MIN_LIQUID - 1, MIN_LIQUID));
+        gw.bridgeToFinney{value: FEE}(address(token), MIN_LIQUID - 1, _liquidExit());
+    }
+
+    function test_liquidExitAtTheMinimumPasses() public {
+        vm.prank(alice);
+        gw.bridgeToFinney{value: FEE}(address(token), MIN_LIQUID, _liquidExit());
+        assertEq(token.balanceOf(address(router)), MIN_LIQUID, "the exact floor still bridges");
+    }
+
+    /// The floor is about what the hub can unstake, so it must not touch the staked route.
+    function test_stakedExitBelowTheLiquidMinimumStillPasses() public {
+        vm.prank(alice);
+        gw.bridgeToFinney{value: FEE}(address(token), MIN_LIQUID - 1, _exit());
+        assertEq(token.balanceOf(address(router)), MIN_LIQUID - 1, "staked exits keep their own lower floor");
+    }
+
+    /// A quote that succeeds for a bridge that would revert is worse than no quote.
+    function test_quoteRejectsTheSameTinyLiquidExit() public {
+        vm.expectRevert(abi.encodeWithSignature("LiquidExitBelowMin(uint256,uint256)", MIN_LIQUID - 1, MIN_LIQUID));
+        gw.quoteBridgeToFinney(address(token), MIN_LIQUID - 1, _liquidExit());
+    }
+
+    function test_liquidMinimumAppliesWithAFeeToo() public {
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSignature("LiquidExitBelowMin(uint256,uint256)", MIN_LIQUID - 1, MIN_LIQUID));
+        gw.bridgeToFinneyWithFee{value: FEE}(address(token), MIN_LIQUID - 1, _liquidExit(), 0, _fee(50));
     }
 
     function test_selectorsArePinned() public pure {

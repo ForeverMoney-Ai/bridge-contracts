@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice One staked position to pull from when wrapping alpha.
 /// @dev    Subtensor keys stake by (coldkey, hotkey, netuid), and the 0x805 `transferStakeFrom`

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {DeployAlpha} from "./DeployAlpha.s.sol";
 import {AlphaVault} from "../src/AlphaVault.sol";
@@ -48,6 +48,21 @@ contract ResumeDeploy is DeployAlpha {
             vault.vaultColdkey() == vm.envBytes32("VAULT_COLDKEY"),
             "resume: VAULT_COLDKEY does not match this vault - wrong vault or wrong coldkey"
         );
+        // That check alone is circular: it compares the env against what the vault was built with.
+        // Derive the coldkey from the vault's address too, so a vault deployed with a wrong-but-
+        // consistent coldkey is still caught here.
+        {
+            string[] memory cmd = new string[](3);
+            cmd[0] = "python3";
+            cmd[1] = "scripts/evm-coldkey.py";
+            cmd[2] = vm.toString(address(vault));
+            bytes memory derived = vm.ffi(cmd);
+            require(derived.length == 32, "resume: evm-coldkey helper did not return 32 bytes");
+            require(
+                bytes32(derived) == vault.vaultColdkey(),
+                "resume: vault coldkey is not blake2b_256(\"evm:\" + vault address)"
+            );
+        }
         require(
             vault.hasRole(vault.DEFAULT_ADMIN_ROLE(), deployer),
             "resume: broadcaster is not vault DEFAULT_ADMIN - handoff already ran?"

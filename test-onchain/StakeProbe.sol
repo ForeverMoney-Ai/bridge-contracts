@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @title StakeProbe — exercises the 0x805 staking primitives against the LIVE 964 runtime.
 ///

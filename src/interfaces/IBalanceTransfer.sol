@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @title Subtensor EVM balance-transfer precompile (0x0000...0800)
 /// @notice Moves native TAO from the caller's EVM balance to a substrate SS58 account.
