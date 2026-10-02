@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @title ExitPayload — the wire format of a return-leg CCIP message (spoke chain -> 964).
 /// @notice Single source of truth for what rides in `EVM2AnyMessage.data`, shared by the sender
@@ -12,10 +12,11 @@ library ExitPayload {
         ///      gateway's rescuer on decode, so no booking can ever land on address(0).
         address evmFallback;
         /// @dev true  -> unwrap to native TAO and exit via the 0x800 precompile.
-        ///      false -> deliver the STAKED position to `ss58` (zero slippage).
+        ///      false -> deliver the STAKED position to `ss58` (no AMM leg; `transferStake` can
+        ///               credit 1 RAO less when it opens a new position).
         bool wantLiquid;
         /// @dev Slippage bound for the liquid unwrap, in native wei. Ignored when `wantLiquid` is
-        ///      false (the staked route is exact). Without this a subnet unwrap would execute at
+        ///      false (the staked route has no AMM leg). Without this a subnet unwrap would execute at
         ///      any AMM price; if the bound is missed the delivery is booked claimable instead.
         uint256 minTaoOut;
     }

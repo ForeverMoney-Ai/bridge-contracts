@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IAlphaVault} from "./interfaces/IAlphaVault.sol";
@@ -40,7 +40,7 @@ contract AlphaToken is ERC20 {
 
     /// @notice Chainlink CCT admin-discovery hook, read by `RegistryModuleOwnerCustom` during
     ///         `registerAdminViaGetCCIPAdmin`. Returns the vault's `ccipAdmin` — normally the
-    ///         OPERATOR multisig, NOT the Timelock — so that listing a token is a one-step ops
+    ///         OPERATOR multisig, NOT the root admin — so that listing a token is a one-step ops
     ///         action: the same key that calls `createToken` can complete the CCIP registration.
     ///         The registration caller must BE that address (the module enforces
     ///         `admin == msg.sender`). `ccipAdmin` itself is repointable only by the vault's

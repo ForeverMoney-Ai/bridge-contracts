@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 /// @notice Verified CCIP v1.6.0 infrastructure addresses + bridge parameters.
 ///         Sources: Chainlink CCIP config API (docs.chain.link/api/ccip/v1/chains), July 2026.

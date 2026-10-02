@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IERC20} from
@@ -25,7 +25,8 @@ import {Cfg, TokenNaming, IRegistryModuleOwnerCustom, ITokenAdminRegistry} from 
 /// Env (run):
 ///   PRIVATE_KEY          deployer key
 ///   HANDOFF              "true" for a production handoff: ADMIN/OPERATOR/GUARDIAN then REQUIRED
-///   ADMIN                DEFAULT_ADMIN_ROLE (Timelock->5/9 multisig) — defaults to deployer
+///   ADMIN                DEFAULT_ADMIN_ROLE holder (a multisig, optionally behind a timelock —
+///                        whatever is passed IS the authority) — defaults to deployer
 ///   OPERATOR             OPERATOR_ROLE — defaults to deployer
 ///   GUARDIAN             GUARDIAN_ROLE — defaults to deployer
 ///   RESCUER              gateway rescuer — defaults to ADMIN
@@ -68,6 +69,12 @@ contract DeployAlpha is Script {
         // VAULT_COLDKEY = blake2b_256("evm:" + predicted vault address) — the vault is the FIRST
         // contract deployed here, so predict via `cast compute-address <deployer> --nonce <n>`.
         address predicted = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+        // Derive it and compare, rather than accepting whatever the env says. The address assert
+        // below only proves we deployed where we expected, not that the coldkey belongs to it.
+        require(
+            _coldkeyFor(predicted) == vm.envBytes32("VAULT_COLDKEY"),
+            "VAULT_COLDKEY is not blake2b_256(\"evm:\" + predicted vault address)"
+        );
 
         vm.startBroadcast(pk);
 
@@ -90,11 +97,15 @@ contract DeployAlpha is Script {
         {
             // Scoped so `predicted` does not survive into the rest of run() — this script compiles
             // without via-ir and is already close to the stack limit.
-            address predicted = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+            address predictedGateway = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+            require(
+                _coldkeyFor(predictedGateway) == vm.envBytes32("GATEWAY_COLDKEY"),
+                "GATEWAY_COLDKEY is not blake2b_256(\"evm:\" + predicted gateway address)"
+            );
             gw = new AlphaGateway(
                 Cfg.SUB_ROUTER, address(vault), Cfg.BASE_SELECTOR, rescuer, vm.envBytes32("GATEWAY_COLDKEY")
             );
-            require(address(gw) == predicted, "gateway addr != predicted; GATEWAY_COLDKEY is for wrong addr");
+            require(address(gw) == predictedGateway, "gateway addr != predicted; GATEWAY_COLDKEY is for wrong addr");
         }
 
         // Listing is OPERATOR-gated, so the deployer needs OPERATOR for the duration of this run.
@@ -169,8 +180,8 @@ contract DeployAlpha is Script {
 
         if (handoff) {
             // transferAdminRole is 2-step: assert it is PENDING for the OPERATOR. (Pool ownership is
-            // also pending, but Chainlink's ownership base exposes no pendingOwner getter, so that
-            // one is verified after the accept via VerifyWiring's EXPECTED_ADMIN/DEPLOYER checks.)
+            // also pending, but Chainlink's ownership base exposes no pendingOwner getter, so it
+            // cannot be asserted here; VerifyWiring checks `pool.owner()` after the accept.)
             address pending =
                 ITokenAdminRegistry(Cfg.SUB_TOKEN_ADMIN_REGISTRY).getTokenConfig(address(token)).pendingAdministrator;
             require(pending == operator, "addToken: registry admin transfer not pending to OPERATOR");
@@ -269,5 +280,17 @@ contract DeployAlpha is Script {
         console2.log("admin (DEFAULT_ADMIN, pending accept):", admin);
         console2.log("operator (OPERATOR_ROLE):             ", operator);
         console2.log("guardian (GUARDIAN_ROLE):             ", guardian);
+    }
+
+    /// @dev blake2b_256("evm:" + addr), the substrate coldkey an EVM address maps to. Not an EVM
+    ///      primitive, so this shells out via `vm.ffi` — run these scripts with `--ffi`.
+    function _coldkeyFor(address addr) internal returns (bytes32) {
+        string[] memory cmd = new string[](3);
+        cmd[0] = "python3";
+        cmd[1] = "scripts/evm-coldkey.py";
+        cmd[2] = vm.toString(addr);
+        bytes memory out = vm.ffi(cmd);
+        require(out.length == 32, "evm-coldkey helper did not return 32 bytes");
+        return bytes32(out);
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {AlphaVault} from "../src/AlphaVault.sol";
@@ -119,6 +119,52 @@ contract IntegratorFeeHubTest is Test {
         assertEq(vault.stakedValueRao(address(wtao)), 1.025e9);
         assertEq(before - user.balance, 1 ether + topUp + FEE, "caller paid amount + top-up + fee");
         assertEq(address(gw).balance, 0, "gateway keeps nothing");
+    }
+
+    // ------------------------------------- top-up vs the runtime's add_stake floor (HACK-22)
+
+    uint256 constant MIN_ADD_STAKE = 2_000_000 * 1e9; // 0.002 TAO; addStake reverts below it
+
+    /// 1% of 0.1 TAO is a 0.001 TAO top-up: too small for `add_stake`, so the whole bridge would
+    /// revert deep inside the vault. We reject it up front instead, before any value moves.
+    function test_topUpBelowAddStakeFloorRevertsBeforeStaking() public {
+        uint256 topUp = gw.integratorTaoTopUp(0.1 ether, 100);
+        assertEq(topUp, 0.001 ether, "1% of 0.1 TAO");
+        assertLt(topUp, MIN_ADD_STAKE);
+        uint256 before = user.balance;
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSignature("TopUpBelowMinStake(uint256,uint256)", topUp, MIN_ADD_STAKE));
+        gw.bridgeOutWithFee{value: 0.1 ether + topUp + FEE}(BASE_SEL, address(wtao), dest, 0.1 ether, 0, 0, _fee(100));
+        assertEq(vault.stakedValueRao(address(wtao)), 0, "nothing staked");
+        assertEq(user.balance, before, "no value left the caller");
+    }
+
+    /// A quote that succeeds for a bridge that reverts is worse than no quote.
+    function test_withFeeQuoteRejectsATopUpBelowTheFloor() public {
+        uint256 topUp = gw.integratorTaoTopUp(0.1 ether, 100);
+        vm.expectRevert(abi.encodeWithSignature("TopUpBelowMinStake(uint256,uint256)", topUp, MIN_ADD_STAKE));
+        gw.quoteBridgeOutWithFee(BASE_SEL, address(wtao), dest, 1 ether, 0.1 ether, 0, _fee(100));
+    }
+
+    function test_withFeeQuoteStillWorksAtTheFloor() public view {
+        (, uint256 nativeTopUp,,) = gw.quoteBridgeOutWithFee(BASE_SEL, address(wtao), dest, 1 ether, 0.2 ether, 0, _fee(100));
+        assertEq(nativeTopUp, MIN_ADD_STAKE);
+    }
+
+    function test_topUpExactlyAtTheFloorIsAccepted() public {
+        uint256 topUp = gw.integratorTaoTopUp(0.2 ether, 100);
+        assertEq(topUp, MIN_ADD_STAKE, "1% of 0.2 TAO is exactly the floor");
+        vm.prank(user);
+        gw.bridgeOutWithFee{value: 0.2 ether + topUp + FEE}(BASE_SEL, address(wtao), dest, 0.2 ether, 0, 0, _fee(100));
+        assertEq(wtao.balanceOf(integrator), topUp, "integrator paid in the wrapped token");
+    }
+
+    /// bps that round the cut to zero are unaffected: there is no top-up to stake.
+    function test_zeroTopUpIsNotCaughtByTheFloor() public {
+        assertEq(gw.integratorTaoTopUp(1, 1), 0);
+        vm.prank(user);
+        gw.bridgeOutWithFee{value: 1 ether + FEE}(BASE_SEL, address(wtao), dest, 1 ether, 0, 0, _fee(0));
+        assertEq(wtao.balanceOf(integrator), 0);
     }
 
     function test_bridgeOut_liquid_missingTopUpReverts() public {

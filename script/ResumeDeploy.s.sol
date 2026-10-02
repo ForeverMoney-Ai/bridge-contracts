@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {DeployAlpha} from "./DeployAlpha.s.sol";
 import {AlphaVault} from "../src/AlphaVault.sol";
@@ -48,6 +48,21 @@ contract ResumeDeploy is DeployAlpha {
             vault.vaultColdkey() == vm.envBytes32("VAULT_COLDKEY"),
             "resume: VAULT_COLDKEY does not match this vault - wrong vault or wrong coldkey"
         );
+        // That check alone is circular: it compares the env against what the vault was built with.
+        // Derive the coldkey from the vault's address too, so a vault deployed with a wrong-but-
+        // consistent coldkey is still caught here.
+        {
+            string[] memory cmd = new string[](3);
+            cmd[0] = "python3";
+            cmd[1] = "scripts/evm-coldkey.py";
+            cmd[2] = vm.toString(address(vault));
+            bytes memory derived = vm.ffi(cmd);
+            require(derived.length == 32, "resume: evm-coldkey helper did not return 32 bytes");
+            require(
+                bytes32(derived) == vault.vaultColdkey(),
+                "resume: vault coldkey is not blake2b_256(\"evm:\" + vault address)"
+            );
+        }
         require(
             vault.hasRole(vault.DEFAULT_ADMIN_ROLE(), deployer),
             "resume: broadcaster is not vault DEFAULT_ADMIN - handoff already ran?"
@@ -65,11 +80,23 @@ contract ResumeDeploy is DeployAlpha {
 
         AlphaGateway gw;
         {
-            address predicted = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+            address predictedGateway = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
+            // Derive it, like the vault coldkey above: matching the CREATE address only proves we
+            // deployed where we expected, not that the env coldkey belongs to that address.
+            string[] memory gcmd = new string[](3);
+            gcmd[0] = "python3";
+            gcmd[1] = "scripts/evm-coldkey.py";
+            gcmd[2] = vm.toString(predictedGateway);
+            bytes memory gderived = vm.ffi(gcmd);
+            require(gderived.length == 32, "resume: evm-coldkey helper did not return 32 bytes");
+            require(
+                bytes32(gderived) == vm.envBytes32("GATEWAY_COLDKEY"),
+                "resume: GATEWAY_COLDKEY is not blake2b_256(\"evm:\" + predicted gateway address)"
+            );
             gw = new AlphaGateway(
                 Cfg.SUB_ROUTER, address(vault), Cfg.BASE_SELECTOR, rescuer, vm.envBytes32("GATEWAY_COLDKEY")
             );
-            require(address(gw) == predicted, "gateway addr != predicted; GATEWAY_COLDKEY is for wrong addr");
+            require(address(gw) == predictedGateway, "gateway addr != predicted; GATEWAY_COLDKEY is for wrong addr");
         }
         vault.grantRole(vault.OPERATOR_ROLE(), deployer);
         (AlphaToken token, LockReleaseTokenPool pool) = _deployToken(vault, guardian, operator, deployer);

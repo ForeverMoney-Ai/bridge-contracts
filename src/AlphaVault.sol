@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {AccessControlDefaultAdminRules} from
     "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
@@ -26,9 +26,9 @@ import {AlphaToken} from "./AlphaToken.sol";
 ///
 ///         Four user routes per token (per-tx choice), each AMM-touching one bounded by a caller min:
 ///           depositLiquid(token, minAlphaOut)      payable — stake TAO->alpha; mints measured alpha
-///           depositStaked(token, alpha)                    — pull existing stake; zero slippage
+///           depositStaked(token, alpha)                    — pull existing stake; no AMM leg
 ///           withdrawLiquid(token, wad, minTaoOut)          — unstake alpha->TAO; pays measured
-///           withdrawStaked(token, wad, destColdkey)        — transfer staked position out; zero slippage
+///           withdrawStaked(token, wad, destColdkey)        — transfer position out; no AMM leg
 ///
 /// @dev  Design rules (carried over from the single-token vault reviews):
 ///        1. MEASURE, don't assume. Deposits mint the getStake delta; liquid withdrawals pay the
@@ -36,17 +36,21 @@ import {AlphaToken} from "./AlphaToken.sol";
 ///        2. ALPHA UNITS for backing/emissions. `harvestableAlphaRao` is the STAKED surplus only.
 ///        3. BACKING IS THE STAKED POSITION, and only that. There is no native buffer to fall back
 ///           on: withdrawLiquid unstakes exactly what it pays and reverts if the position is short.
-///        4. SLIPPAGE IS EXPLICIT. Every conversion takes a caller min-received.
+///        4. SLIPPAGE IS EXPLICIT. Every AMM conversion takes a caller min-received (the staked
+///           routes have no AMM leg, so there is nothing to bound).
 ///
 ///        Access control (docs/access-control.md): three GLOBAL tiers on
 ///        AccessControlDefaultAdminRules (root rotation is 2-step + time-delayed). One
 ///        admin/operator/guardian set governs all tokens; the halt is global (a vault-logic incident
 ///        affects every token; per-token granularity can be added later if ever needed).
-///          - DEFAULT_ADMIN_ROLE : slow/root tier (Timelock -> multisig). Reroutes value
+///          - DEFAULT_ADMIN_ROLE : slow/root tier. Whether it is slow depends entirely on the
+///            holder (a multisig, optionally behind a timelock); the checks here are immediate
+///            `hasRole` checks. Reroutes value
 ///            (setEmissionsRecipient), manages roles, sets gateway lanes, and points `ccipAdmin`
 ///            (setCcipAdmin) — it does NOT list tokens.
 ///          - OPERATOR_ROLE      : fast multisig-direct tier (createToken, addToken,
-///            migrateValidator, setSkimMargin, skimStaked, sweepExcess, unpause, adminHold).
+///            migrateValidator, setSkimMargin, skim, skimStaked, claimRoot, claimRootFor,
+///            sweepExcess, unpause, adminHold).
 ///            Listing is deliberately a FAST-lane action: AlphaToken.getCCIPAdmin() resolves to
 ///            `ccipAdmin` (normally this same multisig), so the operator can both list a token and
 ///            complete its CCIP registration without waiting on the timelock. CCIP reads
@@ -84,6 +88,15 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     IStaking public immutable STAKING; // 0x805 in production; injectable for tests
     uint256 private constant RAO = 1e9; // wei per RAO; 1e18 token == 1e9 alpha RAO
 
+    /// @dev Subtensor enforces its own minimums on the staking precompile — measured on mainnet
+    ///      964: `removeStake` reverts below 2,000,000 RAO, `transferStake` below 1,000,000 RAO.
+    ///      They are deliberately NOT mirrored as constants here. This contract is immutable and
+    ///      those are runtime parameters: pinning them would permanently block withdrawals the
+    ///      runtime is willing to serve if a floor is ever lowered, which is a worse failure than
+    ///      the precompile's own revert. Callers that want an early, named rejection get it at the
+    ///      bridge edge (SpokeGateway.MIN_LIQUID_EXIT_WEI), where the cost of being wrong is a
+    ///      rejected message rather than a stuck position.
+
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
@@ -110,16 +123,19 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     address public emissionsRecipient; // global: all tokens' emissions route here
 
     /// @notice Notice period before a migration may execute. Deposits stop the moment a migration
-    ///         is initiated, so this window is a one-way drain: holders can leave, nobody can
-    ///         enter, and the position can only shrink while they decide.
+    ///         is initiated, so nobody can enter and the position can only shrink. Withdrawals are
+    ///         NOT guaranteed to stay open across the window: OPERATOR can halt them with
+    ///         `adminHold`. The intent is that holders are migrated together with the backing,
+    ///         not that they exit through the old vault.
     uint256 public constant MIGRATION_DELAY = 7 days;
 
     address public migrationTarget;
     bytes32 public migrationColdkey;
     uint256 public migrationReadyAt; // 0 = no migration announced
     /// @notice Set once by `finishMigration`, never unset. The vault is retired: deposits are shut
-    ///         permanently, no further migration can be announced, and withdrawals stay open for
-    ///         whatever backing was left behind.
+    ///         permanently, no further migration can be announced, and every value route is halted
+    ///         (`pausedUntil` is set to max). OPERATOR can lift that halt with `unpause`/`adminHold`
+    ///         if backing was left behind.
     bool public migrationFinished;
     /// @notice True once ANY token's position has actually been moved. Cancellation is a way back
     ///         only while nothing has left; after the first `executeMigration` there is no way
@@ -130,8 +146,10 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     /// @notice The address `AlphaToken.getCCIPAdmin()` resolves to — i.e. the account Chainlink's
     ///         `registerAdminViaGetCCIPAdmin` requires as msg.sender, and which then becomes the
     ///         token's registry administrator (holding `setPool`). Normally the OPERATOR multisig,
-    ///         so listing a token is a one-step ops action rather than a timelocked one. Repointed
-    ///         only by DEFAULT_ADMIN, and only affects tokens registered AFTER the change.
+    ///         so listing a token is a one-step ops action that does not need the root admin.
+    ///         Whether that root admin is slower depends on who holds it — both are immediate
+    ///         `hasRole` checks here. Repointed only by DEFAULT_ADMIN, and only affects tokens
+    ///         registered AFTER the change.
     address public ccipAdmin;
 
     /// @notice Halt state (global). `pausedUntil` = timestamp the halt lifts itself; `pauseableAfter`
@@ -274,7 +292,7 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     /// @notice ONE-CALL listing: deploy the AlphaToken AND list it on a netuid (delegating to
     ///         `validator_`) atomically — OPERATOR (fast tier: listing is an ops action, and the
     ///         matching CCIP registration is gated on `ccipAdmin`, normally the same multisig, so
-    ///         the whole listing completes without the timelock). The preferred path: the vault
+    ///         the whole listing completes without involving the root admin). The preferred path: the vault
     ///         constructs the token itself, so the VAULT binding, mint/burn authority and listing
     ///         can never be mis-assembled.
     function createToken(string calldata name_, string calldata symbol_, bytes32 validator_, uint256 netuid_)
@@ -347,7 +365,7 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
         emit DepositLiquid(token, msg.sender, msg.value, minted);
     }
 
-    /// @notice Staked route (zero slippage): pull `alphaRao` of the caller's EXISTING stake on this
+    /// @notice Staked route (no AMM leg, so no price slippage): pull `alphaRao` of the caller's EXISTING stake on this
     ///         token's subnet+validator. Caller must first 0x805 approve(vault, netuid, >= alphaRao).
     function depositStaked(address token, uint256 alphaRao)
         external
@@ -408,8 +426,9 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
         emit WithdrawLiquid(token, msg.sender, wad, taoOut);
     }
 
-    /// @notice Staked route (zero slippage): burn `wad`, transfer the corresponding staked alpha to
-    ///         `destColdkey`. Position stays staked to the token's validator.
+    /// @notice Staked route (no AMM leg, so no price slippage): burn `wad`, transfer the
+    ///         corresponding staked alpha to `destColdkey`. Position stays staked to the token's
+    ///         validator. `transferStake` can still credit 1 RAO less when it opens a new position.
     function withdrawStaked(address token, uint256 wad, bytes32 destColdkey)
         external
         whenNotHalted
@@ -536,8 +555,8 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     // ------------------------------------------------------------------ emissions
 
     /// @notice Harvest `token`'s emissions as NATIVE TAO to `emissionsRecipient` (unstakes the
-    ///         surplus). Permissionless; AMM proceeds bounded by `minTaoOut`; use `skimStaked` for a
-    ///         guaranteed zero-slippage harvest on illiquid subnets.
+    ///         surplus). OPERATOR_ROLE only; AMM proceeds bounded by `minTaoOut`; use `skimStaked`
+    ///         for a guaranteed zero-slippage harvest on illiquid subnets.
     function skim(address token, uint256 minTaoOut)
         external
         onlyRole(OPERATOR_ROLE)
@@ -556,8 +575,8 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
         emit Skimmed(token, emissionsRecipient, surplusAlpha, taoOut);
     }
 
-    /// @notice Harvest `token`'s emissions as STAKED alpha (zero slippage) to `destColdkey`.
-    ///         OPERATOR-only because the destination is a free parameter.
+    /// @notice Harvest `token`'s emissions as STAKED alpha (no AMM leg) to `destColdkey`.
+    ///         OPERATOR_ROLE only; the destination is a free parameter.
     function skimStaked(address token, bytes32 destColdkey)
         external
         onlyRole(OPERATOR_ROLE)
@@ -579,9 +598,9 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     /// @notice Redeem this vault's accrued beta-basket entitlement across every validator it root-
     ///         stakes to, and report what it paid.
     ///
-    /// @dev Permissionless, for the same reason `skim` is: the destination is not a parameter. The
-    ///      runtime sells the basket share and stakes the proceeds under THIS vault's coldkey, so
-    ///      a caller can only ever increase our backing. Someone else paying the gas is a gift.
+    /// @dev OPERATOR_ROLE only. The destination is not a parameter: the runtime sells the basket
+    ///      share and stakes the proceeds under THIS vault's coldkey, so a call can only ever
+    ///      increase our backing.
     ///
     ///      This exists because nobody else can do it for us. `claim_root_with_hotkey` takes the
     ///      staker's coldkey as origin, and ours is the EVM mirror of this address — no private
@@ -642,8 +661,10 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
 
     /// @notice Announce a move of this vault's backing to `target`, starting the notice period.
     ///
-    /// @dev Deposits close immediately (see `whenNotMigrating`); withdrawals stay open. That
-    ///      asymmetry is the point — the window only ever drains.
+    /// @dev Deposits close immediately (see `whenNotMigrating`), so the window only ever drains.
+    ///      Withdrawals are NOT guaranteed open across it: OPERATOR can halt them with `adminHold`,
+    ///      and `executeMigration` itself runs during a halt. The intent is that holders move with
+    ///      the backing, not that they exit here.
     ///
     ///      `targetColdkey` is supplied rather than derived because the EVM has no blake2b
     ///      precompile and hand-rolling one for a single value is a poor trade. It is checked
@@ -733,16 +754,18 @@ contract AlphaVault is AccessControlDefaultAdminRules, ReentrancyGuard {
     ///      `Insolvent` for them permanently, and nothing here gives them a second chance.
     ///
     ///      The protection is the NOTICE WINDOW, not a supply check. `initiateMigration` freezes
-    ///      deposits immediately while leaving withdrawals open, so MIGRATION_DELAY is a one-way
-    ///      drain: for seven days holders can leave, nobody can enter, and the position can only
-    ///      shrink. Migrating after that is a deliberate, announced, admin-only act.
+    ///      deposits immediately, so for seven days nobody can enter and the position can only
+    ///      shrink. Withdrawals are not guaranteed to stay open across that window — OPERATOR may
+    ///      halt them with `adminHold`, and the intent is that holders move with the backing
+    ///      rather than exit here. Migrating is a deliberate, announced, admin-only act.
     ///
     ///      Earlier designs gated this on a supply cap and on a longer second delay. Both were
     ///      removed: a cap that can be raised and a delay that can be waited out are not
     ///      guarantees, and pretending otherwise made the real protection — the exit window —
     ///      look like a formality. This states the bargain plainly instead.
     ///
-    ///      Same-netuid `transferStake` is exact and zero-fee, so this is not an AMM round trip.
+    ///      Same-netuid `transferStake` is fee-free and has no AMM leg, so this is not a round trip
+    ///      through the pool. It can still credit 1 RAO less when it opens a new position.
     function executeMigration(address token)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)

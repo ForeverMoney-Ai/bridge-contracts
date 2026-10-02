@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Client} from "@chainlink/contracts-ccip/contracts/libraries/Client.sol";
@@ -26,13 +26,13 @@ contract SpokeGateway {
     uint64 public immutable BITTENSOR_SELECTOR;
     address public immutable SUBTENSOR_GATEWAY; // the ONE shared receiver on 964
 
-    /// @notice Who may change the fee, and where the fee goes. BOTH IMMUTABLE, on purpose.
+    /// @notice Who may change the fee. IMMUTABLE, on purpose; the destination is NOT.
     /// @dev This contract was deliberately ownerless. A settable fee needs an authority, so the
-    ///      smallest possible concession is made: the authority and the destination are fixed at
-    ///      construction and only the NUMBER moves. Nobody can transfer control of this contract,
-    ///      redirect the proceeds, or reach the bridged tokens — the worst a compromised FEE_ADMIN
-    ///      can do is set the markup to its capped maximum and make bridging expensive, which is
-    ///      visible, reversible on redeploy, and steals nothing.
+    ///      smallest possible concession is made: the authority is fixed at construction and cannot
+    ///      be transferred. FEE_ADMIN can move the markup (within its cap) and redirect FUTURE fee
+    ///      income via `setFeeRecipient`; it cannot reach the bridged tokens or a caller's refund.
+    ///      So the worst a compromised FEE_ADMIN can do is make bridging expensive and collect the
+    ///      markup, which is visible and reversible on redeploy.
     address public immutable FEE_ADMIN;
 
     /// @notice Where the markup goes. Seeded at construction and repointable by FEE_ADMIN.
@@ -67,8 +67,20 @@ contract SpokeGateway {
     error ZeroIntegrator();
     error IntegratorFeeTransferFailed();
 
+    /// @notice Smallest amount an exit may carry, per route, in 18-dec wei. Below these the hub's
+    ///         precompile call reverts, so the arrival can only be booked claimable and the user has
+    ///         to come back for it; rejecting at the source is cheaper and clearer. Measured on
+    ///         mainnet 964: `removeStake` (the liquid route) reverts below 2,000,000 RAO,
+    ///         `transferStake` (the staked route) below 1,000,000 RAO.
+    /// @dev    These bound what CROSSES. The vault itself does not mirror them: it is immutable and
+    ///         these are runtime parameters, so pinning them there could permanently block
+    ///         withdrawals the runtime would still serve. Here the cost of a stale floor is a
+    ///         rejected message, not a stuck position.
+    uint256 internal constant MIN_LIQUID_EXIT_WEI = 2_000_000 * 1e9;
+    uint256 internal constant MIN_STAKED_EXIT_WEI = 1_000_000 * 1e9;
+
     /// @notice Default destination-execution gas budget for `handleExit` on 964. Sized for today's
-    ///         exit logic; callers may override per-message via the 6-arg `bridgeToFinney` (passing 0
+    ///         exit logic; callers may override per-message via the 4-arg `bridgeToFinney` (passing 0
     ///         keeps this default). Too low -> the delivery fails on 964 and is recovered via a
     ///         claimable booking or CCIP manual re-execution (a deep OOG can starve even the catch's
     ///         booking, in which case ccipReceive reverts and the message is manually re-executable
@@ -82,6 +94,8 @@ contract SpokeGateway {
     );
 
     error ZeroAmount();
+    error LiquidExitBelowMin(uint256 amount, uint256 min);
+    error StakedExitBelowMin(uint256 amount, uint256 min);
     error ZeroAddress();
     error ZeroSelector();
     error ZeroFallback();
@@ -158,11 +172,21 @@ contract SpokeGateway {
 
     /// @dev What a caller must actually send: router fee plus markup. Quoted rather than the bare
     ///      CCIP fee, so nobody is told one number and charged another.
+    /// @dev One floor check for both routes, so the quote and the bridge can never disagree.
+    function _requireAboveExitFloor(uint256 amount, bool wantLiquid) private pure {
+        if (wantLiquid) {
+            if (amount < MIN_LIQUID_EXIT_WEI) revert LiquidExitBelowMin(amount, MIN_LIQUID_EXIT_WEI);
+        } else if (amount < MIN_STAKED_EXIT_WEI) {
+            revert StakedExitBelowMin(amount, MIN_STAKED_EXIT_WEI);
+        }
+    }
+
     function _grossFee(uint256 ccipFee) private view returns (uint256) {
         return ccipFee + (ccipFee * bridgeFeeBps) / 10_000;
     }
 
-    /// @notice Quote the CCIP fee (in native ETH) for bridging `amount` of `token` to Finney (default gas).
+    /// @notice Quote the CCIP fee (in the spoke chain's native gas token) for bridging `amount` of
+    ///         `token` to Finney (default gas).
     function quoteBridgeToFinney(address token, uint256 amount, ExitPayload.Params calldata exit)
         external
         view
@@ -206,6 +230,7 @@ contract SpokeGateway {
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
         if (exit.evmFallback == address(0)) revert ZeroFallback();
+        _requireAboveExitFloor(amount, exit.wantLiquid);
         _validateIntegratorFee(integrator);
         cut = _integratorCut(amount, integrator);      // paid on top by the caller
         net = amount;                                    // crosses in full
@@ -259,6 +284,7 @@ contract SpokeGateway {
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
         if (exit.evmFallback == address(0)) revert ZeroFallback(); // must never enter the system zero
+        _requireAboveExitFloor(amount, exit.wantLiquid);
         _validateIntegratorFee(integrator);
 
         uint256 cut = _integratorCut(amount, integrator);
@@ -318,7 +344,7 @@ contract SpokeGateway {
             receiver: abi.encode(SUBTENSOR_GATEWAY),
             data: ExitPayload.encode(exit),
             tokenAmounts: tokens,
-            feeToken: address(0), // native ETH
+            feeToken: address(0), // the spoke chain's native gas token
             extraArgs: Client._argsToBytes(
                 Client.GenericExtraArgsV2({gasLimit: gasLimit, allowOutOfOrderExecution: true})
             )
